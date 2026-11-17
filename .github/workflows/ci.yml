@@ -1,0 +1,58 @@
+name: Production Quality & Hermes Bundle Gate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck, Lint, Test, Doctor & Hermes Export
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Git Secret Guard (Fail if secrets or keystores are tracked)
+        run: |
+          TRACKED_SECRETS=$(git ls-files '.env' '.env.local' '.env.production' '*.jks' '*.keystore')
+          if [ -n "$TRACKED_SECRETS" ]; then
+            echo "::error::Sensitive secret or keystore files are tracked in Git:"
+            echo "$TRACKED_SECRETS"
+            exit 1
+          fi
+          echo "Git Secret Guard passed: zero tracked secret or keystore files."
+
+      - name: Setup Node.js 22 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies cleanly
+        run: npm ci
+
+      - name: Run TypeScript strict typecheck
+        run: npm run typecheck
+
+      - name: Run ESLint & Prettier check
+        run: npm run lint
+
+      - name: Run Jest unit tests
+        run: npm test
+
+      - name: Run Expo Doctor compatibility check
+        run: npm run doctor
+
+      - name: Verify Android Production Hermes Bundle Export
+        env:
+          EXPO_PUBLIC_APP_ENV: production
+          EXPO_PUBLIC_AUTH_PROVIDER: clerk
+          EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_Y2ktcGxhY2Vob2xkZXIta2V5LTAwLmNsZXJrLmFjY291bnRzLmRldiQ
+        run: npx expo export --platform android --output-dir dist-ci

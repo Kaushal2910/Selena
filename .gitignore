@@ -41,3 +41,16 @@ example
 # generated native folders
 /ios
 /android
+
+
+
+# Environment & Signing Secrets
+.env
+.env.local
+.env.production
+*.jks
+*.keystore
+"@
+# CI Build & Test Coverage Artifacts
+dist-ci/
+coverage/
