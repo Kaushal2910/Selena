@@ -18,6 +18,7 @@ export type AuthStatus = 'bootstrapping' | 'unauthenticated' | 'authenticated';
 export interface AuthUser {
   id: string;
   email: string;
+  fullName: string | null;
 }
 
 export interface AuthContextValue {
@@ -27,7 +28,8 @@ export interface AuthContextValue {
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (
     email: string,
-    password: string
+    password: string,
+    fullName?: string
   ) => Promise<{ requiresEmailVerification: boolean }>;
   verifyEmailCode: (code: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -42,15 +44,21 @@ interface ClerkErrorItem {
 }
 
 interface ClerkErrorShape {
+  code?: string;
+  message?: string;
+  longMessage?: string;
   errors?: ClerkErrorItem[];
 }
 
 function mapClerkError(err: unknown): string {
-  if (typeof err === 'object' && err !== null && 'errors' in err) {
+  if (typeof err === 'object' && err !== null) {
     const clerkErr = err as ClerkErrorShape;
-    const first = clerkErr.errors?.[0];
-    if (first) {
-      switch (first.code) {
+    const item: ClerkErrorItem | undefined = Array.isArray(clerkErr.errors)
+      ? clerkErr.errors[0]
+      : clerkErr;
+
+    if (item) {
+      switch (item.code) {
         case 'form_password_incorrect':
           return 'Incorrect email or password. Please try again.';
         case 'form_identifier_not_found':
@@ -66,11 +74,20 @@ function mapClerkError(err: unknown): string {
         case 'too_many_requests':
           return 'Too many attempts. Please wait a moment and try again.';
         default:
-          if (typeof first.message === 'string' && first.message.length > 0) {
-            return first.message;
+          if (
+            typeof item.longMessage === 'string' &&
+            item.longMessage.length > 0
+          ) {
+            return item.longMessage;
+          }
+          if (typeof item.message === 'string' && item.message.length > 0) {
+            return item.message;
           }
       }
     }
+  }
+  if (err instanceof Error && err.message.length > 0) {
+    return err.message;
   }
   return 'Authentication failed. Please check your connection and try again.';
 }
@@ -100,9 +117,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       clerkUser.primaryEmailAddress?.emailAddress ??
       clerkUser.emailAddresses[0]?.emailAddress ??
       '';
+    const fullName =
+      clerkUser.fullName ??
+      ([clerkUser.firstName, clerkUser.lastName].filter(Boolean).join(' ') ||
+        null);
     return {
       id: clerkUser.id,
       email: primaryEmail,
+      fullName,
     };
   }, [isSignedIn, clerkUser]);
 
@@ -112,6 +134,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       setIsSubmitting(true);
       try {
+        await clerkSignIn.reset();
         const { error } = await clerkSignIn.password({
           emailAddress: email.trim().toLowerCase(),
           password,
@@ -125,7 +148,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           await clerkSignIn.finalize();
         } else {
           throw new Error(
-            'Additional verification steps are required for this account.'
+            `Sign-in incomplete (status: ${clerkSignIn.status}). Check your Clerk authentication settings.`
           );
         }
       } catch (err) {
@@ -143,7 +166,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signUp = useCallback(
     async (
       email: string,
-      password: string
+      password: string,
+      fullName?: string
     ): Promise<{ requiresEmailVerification: boolean }> => {
       if (isSubmitting || !clerkSignUp) {
         return { requiresEmailVerification: false };
@@ -151,9 +175,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       setIsSubmitting(true);
       try {
+        await clerkSignUp.reset();
+        const trimmedName = fullName?.trim() ?? '';
+        const nameParts = trimmedName.split(/\s+/).filter(Boolean);
+        const firstName = nameParts[0];
+        const lastName =
+          nameParts.length > 1 ? nameParts.slice(1).join(' ') : undefined;
+
         const { error } = await clerkSignUp.password({
           emailAddress: email.trim().toLowerCase(),
           password,
+          ...(firstName ? { firstName } : {}),
+          ...(lastName ? { lastName } : {}),
         });
 
         if (error) {
@@ -174,7 +207,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           return { requiresEmailVerification: true };
         }
 
-        throw new Error('Additional sign-up requirements are pending.');
+        throw new Error(
+          `Sign-up incomplete (status: ${clerkSignUp.status}). Check your Clerk authentication settings.`
+        );
       } catch (err) {
         if (err instanceof Error) {
           throw err;

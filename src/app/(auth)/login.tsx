@@ -14,54 +14,107 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { z } from 'zod';
 
-type AuthMode = 'sign-in' | 'sign-up' | 'verify-email';
-
-const credentialsSchema = z.object({
+const signInSchema = z.object({
   email: z
     .string()
     .trim()
-    .min(1, 'Email is required.')
-    .email('Enter a valid email address.'),
+    .min(1, 'Please enter your email address.')
+    .email('Please enter a valid email address.'),
   password: z.string().min(8, 'Password must be at least 8 characters long.'),
+});
+
+const signUpSchema = signInSchema.extend({
+  fullName: z
+    .string()
+    .trim()
+    .min(2, 'Please enter your name (at least 2 characters).')
+    .max(50, 'Name must be 50 characters or less.'),
 });
 
 const otpSchema = z.object({
   code: z
     .string()
     .trim()
-    .regex(/^\d{6}$/, 'Enter the 6-digit numeric code sent to your email.'),
+    .regex(
+      /^\d{6}$/,
+      'Enter the 6-digit verification code sent to your email.'
+    ),
 });
 
+type AuthMode = 'signIn' | 'signUp' | 'verifyOtp';
+type FocusedField = 'fullName' | 'email' | 'password' | 'code' | null;
+
 interface FieldErrors {
+  fullName?: string;
   email?: string;
   password?: string;
   code?: string;
-  general?: string;
 }
 
 export default function LoginScreen() {
   const { signIn, signUp, verifyEmailCode, isSubmitting } = useAuth();
-  const [mode, setMode] = useState<AuthMode>('sign-in');
+  const [mode, setMode] = useState<AuthMode>('signIn');
+  const [fullName, setFullName] = useState<string>('');
   const [email, setEmail] = useState<string>('');
   const [password, setPassword] = useState<string>('');
+  const [showPassword, setShowPassword] = useState<boolean>(false);
   const [code, setCode] = useState<string>('');
+  const [focusedField, setFocusedField] = useState<FocusedField>(null);
   const [errors, setErrors] = useState<FieldErrors>({});
+  const [authError, setAuthError] = useState<string | null>(null);
 
   const switchMode = (nextMode: AuthMode) => {
-    if (isSubmitting) return;
-    setErrors({});
-    setCode('');
     setMode(nextMode);
+    setErrors({});
+    setAuthError(null);
+    setShowPassword(false);
+    if (nextMode !== 'verifyOtp') {
+      setCode('');
+    }
   };
 
   const handleCredentialsSubmit = async () => {
     if (isSubmitting) return;
+    setAuthError(null);
 
-    const parsed = credentialsSchema.safeParse({ email, password });
+    if (mode === 'signIn') {
+      const parsed = signInSchema.safeParse({ email, password });
+      if (!parsed.success) {
+        const nextErrors: FieldErrors = {};
+        for (const issue of parsed.error.issues) {
+          const field = issue.path[0];
+          if (field === 'email' && !nextErrors.email) {
+            nextErrors.email = issue.message;
+          }
+          if (field === 'password' && !nextErrors.password) {
+            nextErrors.password = issue.message;
+          }
+        }
+        setErrors(nextErrors);
+        return;
+      }
+
+      setErrors({});
+      try {
+        await signIn(parsed.data.email, parsed.data.password);
+      } catch (err) {
+        setAuthError(
+          err instanceof Error
+            ? err.message
+            : 'Unable to sign in right now. Please try again.'
+        );
+      }
+      return;
+    }
+
+    const parsed = signUpSchema.safeParse({ fullName, email, password });
     if (!parsed.success) {
       const nextErrors: FieldErrors = {};
       for (const issue of parsed.error.issues) {
         const field = issue.path[0];
+        if (field === 'fullName' && !nextErrors.fullName) {
+          nextErrors.fullName = issue.message;
+        }
         if (field === 'email' && !nextErrors.email) {
           nextErrors.email = issue.message;
         }
@@ -75,39 +128,42 @@ export default function LoginScreen() {
 
     setErrors({});
     try {
-      if (mode === 'sign-in') {
-        await signIn(parsed.data.email, parsed.data.password);
-      } else {
-        const res = await signUp(parsed.data.email, parsed.data.password);
-        if (res.requiresEmailVerification) {
-          setMode('verify-email');
-        }
+      const res = await signUp(
+        parsed.data.email,
+        parsed.data.password,
+        parsed.data.fullName
+      );
+      if (res.requiresEmailVerification) {
+        setMode('verifyOtp');
       }
-    } catch (err: unknown) {
-      const message =
-        err instanceof Error ? err.message : 'Authentication failed.';
-      setErrors({ general: message });
+    } catch (err) {
+      setAuthError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to create account right now. Please try again.'
+      );
     }
   };
 
-  const handleVerifyCode = async () => {
+  const handleVerifyOtp = async () => {
     if (isSubmitting) return;
+    setAuthError(null);
 
     const parsed = otpSchema.safeParse({ code });
     if (!parsed.success) {
-      setErrors({
-        code: parsed.error.issues[0]?.message ?? 'Invalid verification code.',
-      });
+      setErrors({ code: parsed.error.issues[0]?.message });
       return;
     }
 
     setErrors({});
     try {
       await verifyEmailCode(parsed.data.code);
-    } catch (err: unknown) {
-      const message =
-        err instanceof Error ? err.message : 'Verification failed.';
-      setErrors({ general: message });
+    } catch (err) {
+      setAuthError(
+        err instanceof Error
+          ? err.message
+          : 'Verification failed. Please try again.'
+      );
     }
   };
 
@@ -121,21 +177,33 @@ export default function LoginScreen() {
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
         >
+          <View style={styles.brandHeader}>
+            <View style={styles.brandMark}>
+              <Text style={styles.brandMarkText}>S</Text>
+            </View>
+            <Text style={styles.brandTitle}>Selena Workspace</Text>
+            <Text style={styles.brandSubtitle}>
+              {mode === 'verifyOtp'
+                ? `We sent a 6-digit code to ${email.trim()}`
+                : 'Sign in to access your workspace and account settings'}
+            </Text>
+          </View>
+
           <View style={styles.card}>
-            {mode !== 'verify-email' ? (
-              <View style={styles.modeToggleRow}>
+            {mode !== 'verifyOtp' ? (
+              <View style={styles.segmentedControl}>
                 <Pressable
                   style={[
-                    styles.modeTab,
-                    mode === 'sign-in' ? styles.modeTabActive : null,
+                    styles.segment,
+                    mode === 'signIn' ? styles.segmentActive : null,
                   ]}
-                  onPress={() => switchMode('sign-in')}
+                  onPress={() => switchMode('signIn')}
                   disabled={isSubmitting}
                 >
                   <Text
                     style={[
-                      styles.modeTabText,
-                      mode === 'sign-in' ? styles.modeTabTextActive : null,
+                      styles.segmentText,
+                      mode === 'signIn' ? styles.segmentTextActive : null,
                     ]}
                   >
                     Sign In
@@ -143,16 +211,16 @@ export default function LoginScreen() {
                 </Pressable>
                 <Pressable
                   style={[
-                    styles.modeTab,
-                    mode === 'sign-up' ? styles.modeTabActive : null,
+                    styles.segment,
+                    mode === 'signUp' ? styles.segmentActive : null,
                   ]}
-                  onPress={() => switchMode('sign-up')}
+                  onPress={() => switchMode('signUp')}
                   disabled={isSubmitting}
                 >
                   <Text
                     style={[
-                      styles.modeTabText,
-                      mode === 'sign-up' ? styles.modeTabTextActive : null,
+                      styles.segmentText,
+                      mode === 'signUp' ? styles.segmentTextActive : null,
                     ]}
                   >
                     Create Account
@@ -161,48 +229,36 @@ export default function LoginScreen() {
               </View>
             ) : null}
 
-            <Text style={styles.title}>
-              {mode === 'sign-in'
-                ? 'Welcome Back'
-                : mode === 'sign-up'
-                  ? 'Create Account'
-                  : 'Verify Your Email'}
-            </Text>
-            <Text style={styles.subtitle}>
-              {mode === 'verify-email'
-                ? `Enter the 6-digit verification code sent to ${email.trim()}`
-                : 'Zero-SMS hardware-backed Clerk authentication'}
-            </Text>
-
-            {errors.general ? (
-              <View style={styles.bannerError}>
-                <Text style={styles.bannerErrorText}>{errors.general}</Text>
+            {authError ? (
+              <View style={styles.errorBanner}>
+                <Text style={styles.errorBannerText}>{authError}</Text>
               </View>
             ) : null}
 
-            {mode === 'verify-email' ? (
+            {mode === 'verifyOtp' ? (
               <>
                 <View style={styles.fieldGroup}>
-                  <Text style={styles.label}>6-Digit Verification Code</Text>
+                  <Text style={styles.label}>Verification Code</Text>
                   <TextInput
                     style={[
                       styles.input,
                       styles.otpInput,
+                      focusedField === 'code' ? styles.inputFocused : null,
                       errors.code ? styles.inputError : null,
                     ]}
                     value={code}
+                    onFocus={() => setFocusedField('code')}
+                    onBlur={() => setFocusedField(null)}
                     onChangeText={(text) => {
                       setCode(text.replace(/[^0-9]/g, '').slice(0, 6));
-                      if (errors.code || errors.general) {
-                        setErrors({});
+                      if (errors.code) {
+                        setErrors((prev) => ({ ...prev, code: undefined }));
                       }
                     }}
-                    placeholder="123456"
-                    placeholderTextColor="#9CA3AF"
+                    placeholder="000000"
+                    placeholderTextColor="#94A3B8"
                     keyboardType="number-pad"
                     maxLength={6}
-                    autoCapitalize="none"
-                    autoCorrect={false}
                     editable={!isSubmitting}
                   />
                   {errors.code ? (
@@ -212,50 +268,87 @@ export default function LoginScreen() {
 
                 <Pressable
                   style={({ pressed }) => [
-                    styles.button,
+                    styles.primaryButton,
                     isSubmitting ? styles.buttonDisabled : null,
                     pressed && !isSubmitting ? styles.buttonPressed : null,
                   ]}
-                  onPress={() => void handleVerifyCode()}
+                  onPress={() => void handleVerifyOtp()}
                   disabled={isSubmitting}
                 >
                   {isSubmitting ? (
                     <ActivityIndicator color="#FFFFFF" />
                   ) : (
-                    <Text style={styles.buttonText}>Verify & Continue</Text>
+                    <Text style={styles.primaryButtonText}>
+                      Verify Email & Continue
+                    </Text>
                   )}
                 </Pressable>
 
                 <Pressable
-                  style={styles.secondaryLink}
-                  onPress={() => switchMode('sign-up')}
+                  style={styles.textLinkButton}
+                  onPress={() => switchMode('signUp')}
                   disabled={isSubmitting}
                 >
-                  <Text style={styles.secondaryLinkText}>Back to Sign Up</Text>
+                  <Text style={styles.textLink}>Use a different email</Text>
                 </Pressable>
               </>
             ) : (
               <>
+                {mode === 'signUp' ? (
+                  <View style={styles.fieldGroup}>
+                    <Text style={styles.label}>Display Name</Text>
+                    <TextInput
+                      style={[
+                        styles.input,
+                        focusedField === 'fullName'
+                          ? styles.inputFocused
+                          : null,
+                        errors.fullName ? styles.inputError : null,
+                      ]}
+                      value={fullName}
+                      onFocus={() => setFocusedField('fullName')}
+                      onBlur={() => setFocusedField(null)}
+                      onChangeText={(text) => {
+                        setFullName(text);
+                        if (errors.fullName) {
+                          setErrors((prev) => ({
+                            ...prev,
+                            fullName: undefined,
+                          }));
+                        }
+                      }}
+                      placeholder="Kaushal Sonawane"
+                      placeholderTextColor="#94A3B8"
+                      autoCapitalize="words"
+                      autoCorrect={false}
+                      textContentType="name"
+                      editable={!isSubmitting}
+                    />
+                    {errors.fullName ? (
+                      <Text style={styles.errorText}>{errors.fullName}</Text>
+                    ) : null}
+                  </View>
+                ) : null}
+
                 <View style={styles.fieldGroup}>
-                  <Text style={styles.label}>Email</Text>
+                  <Text style={styles.label}>Email address</Text>
                   <TextInput
                     style={[
                       styles.input,
+                      focusedField === 'email' ? styles.inputFocused : null,
                       errors.email ? styles.inputError : null,
                     ]}
                     value={email}
+                    onFocus={() => setFocusedField('email')}
+                    onBlur={() => setFocusedField(null)}
                     onChangeText={(text) => {
                       setEmail(text);
-                      if (errors.email || errors.general) {
-                        setErrors((prev) => ({
-                          ...prev,
-                          email: undefined,
-                          general: undefined,
-                        }));
+                      if (errors.email) {
+                        setErrors((prev) => ({ ...prev, email: undefined }));
                       }
                     }}
-                    placeholder="you@example.com"
-                    placeholderTextColor="#9CA3AF"
+                    placeholder="name@company.com"
+                    placeholderTextColor="#94A3B8"
                     autoCapitalize="none"
                     autoCorrect={false}
                     keyboardType="email-address"
@@ -268,31 +361,46 @@ export default function LoginScreen() {
                 </View>
 
                 <View style={styles.fieldGroup}>
-                  <Text style={styles.label}>Password (min 8 chars)</Text>
-                  <TextInput
+                  <Text style={styles.label}>Password</Text>
+                  <View
                     style={[
-                      styles.input,
+                      styles.passwordWrapper,
+                      focusedField === 'password' ? styles.inputFocused : null,
                       errors.password ? styles.inputError : null,
                     ]}
-                    value={password}
-                    onChangeText={(text) => {
-                      setPassword(text);
-                      if (errors.password || errors.general) {
-                        setErrors((prev) => ({
-                          ...prev,
-                          password: undefined,
-                          general: undefined,
-                        }));
-                      }
-                    }}
-                    placeholder="••••••••"
-                    placeholderTextColor="#9CA3AF"
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    secureTextEntry
-                    textContentType="password"
-                    editable={!isSubmitting}
-                  />
+                  >
+                    <TextInput
+                      style={styles.passwordInput}
+                      value={password}
+                      onFocus={() => setFocusedField('password')}
+                      onBlur={() => setFocusedField(null)}
+                      onChangeText={(text) => {
+                        setPassword(text);
+                        if (errors.password) {
+                          setErrors((prev) => ({
+                            ...prev,
+                            password: undefined,
+                          }));
+                        }
+                      }}
+                      placeholder="Minimum 8 characters"
+                      placeholderTextColor="#94A3B8"
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      secureTextEntry={!showPassword}
+                      textContentType="password"
+                      editable={!isSubmitting}
+                    />
+                    <Pressable
+                      style={styles.visibilityToggle}
+                      onPress={() => setShowPassword((prev) => !prev)}
+                      hitSlop={8}
+                    >
+                      <Text style={styles.visibilityText}>
+                        {showPassword ? 'Hide' : 'Show'}
+                      </Text>
+                    </Pressable>
+                  </View>
                   {errors.password ? (
                     <Text style={styles.errorText}>{errors.password}</Text>
                   ) : null}
@@ -300,7 +408,7 @@ export default function LoginScreen() {
 
                 <Pressable
                   style={({ pressed }) => [
-                    styles.button,
+                    styles.primaryButton,
                     isSubmitting ? styles.buttonDisabled : null,
                     pressed && !isSubmitting ? styles.buttonPressed : null,
                   ]}
@@ -310,8 +418,8 @@ export default function LoginScreen() {
                   {isSubmitting ? (
                     <ActivityIndicator color="#FFFFFF" />
                   ) : (
-                    <Text style={styles.buttonText}>
-                      {mode === 'sign-in' ? 'Sign In' : 'Create Account'}
+                    <Text style={styles.primaryButtonText}>
+                      {mode === 'signIn' ? 'Sign In' : 'Create Account'}
                     </Text>
                   )}
                 </Pressable>
@@ -327,7 +435,7 @@ export default function LoginScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#F9FAFB',
+    backgroundColor: '#F8FAFC',
   },
   keyboardContainer: {
     flex: 1,
@@ -336,61 +444,94 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     justifyContent: 'center',
     paddingHorizontal: 24,
-    paddingVertical: 16,
+    paddingVertical: 32,
+  },
+  brandHeader: {
+    alignItems: 'center',
+    marginBottom: 28,
+  },
+  brandMark: {
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    backgroundColor: '#0F172A',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 14,
+  },
+  brandMarkText: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '700',
+  },
+  brandTitle: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#0F172A',
+    letterSpacing: -0.3,
+  },
+  brandSubtitle: {
+    fontSize: 14,
+    color: '#64748B',
+    textAlign: 'center',
+    marginTop: 6,
+    lineHeight: 20,
+    maxWidth: 300,
   },
   card: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 24,
+    borderRadius: 16,
+    padding: 22,
     borderWidth: 1,
-    borderColor: '#E5E7EB',
+    borderColor: '#E2E8F0',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    elevation: 2,
   },
-  modeToggleRow: {
+  segmentedControl: {
     flexDirection: 'row',
-    backgroundColor: '#F3F4F6',
-    borderRadius: 8,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 10,
     padding: 4,
     marginBottom: 20,
   },
-  modeTab: {
+  segment: {
     flex: 1,
-    paddingVertical: 8,
+    paddingVertical: 9,
     alignItems: 'center',
-    borderRadius: 6,
+    borderRadius: 8,
   },
-  modeTabActive: {
+  segmentActive: {
     backgroundColor: '#FFFFFF',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 2,
+    elevation: 1,
   },
-  modeTabText: {
+  segmentText: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#6B7280',
+    color: '#64748B',
   },
-  modeTabTextActive: {
-    color: '#111827',
+  segmentTextActive: {
+    color: '#0F172A',
   },
-  title: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: '#111827',
-  },
-  subtitle: {
-    fontSize: 13,
-    color: '#6B7280',
-    marginTop: 4,
-    marginBottom: 18,
-  },
-  bannerError: {
+  errorBanner: {
     backgroundColor: '#FEF2F2',
     borderWidth: 1,
     borderColor: '#FECACA',
-    borderRadius: 8,
+    borderRadius: 10,
     padding: 12,
     marginBottom: 16,
   },
-  bannerErrorText: {
+  errorBannerText: {
     fontSize: 13,
     color: '#B91C1C',
+    fontWeight: '500',
+    lineHeight: 18,
   },
   fieldGroup: {
     marginBottom: 16,
@@ -398,37 +539,65 @@ const styles = StyleSheet.create({
   label: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#374151',
+    color: '#334155',
     marginBottom: 6,
   },
   input: {
-    borderWidth: 1,
-    borderColor: '#D1D5DB',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderWidth: 1.5,
+    borderColor: '#CBD5E1',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
     fontSize: 15,
-    color: '#111827',
+    color: '#0F172A',
     backgroundColor: '#FFFFFF',
   },
-  otpInput: {
-    fontSize: 20,
-    letterSpacing: 6,
-    textAlign: 'center',
-    fontWeight: '700',
+  passwordWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: '#CBD5E1',
+    borderRadius: 10,
+    backgroundColor: '#FFFFFF',
+    paddingRight: 12,
+  },
+  passwordInput: {
+    flex: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    fontSize: 15,
+    color: '#0F172A',
+  },
+  visibilityToggle: {
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+  },
+  visibilityText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#475569',
+  },
+  inputFocused: {
+    borderColor: '#0F172A',
   },
   inputError: {
     borderColor: '#DC2626',
   },
+  otpInput: {
+    fontSize: 22,
+    fontWeight: '700',
+    letterSpacing: 8,
+    textAlign: 'center',
+  },
   errorText: {
     fontSize: 12,
     color: '#DC2626',
-    marginTop: 4,
+    marginTop: 5,
   },
-  button: {
-    backgroundColor: '#111827',
-    borderRadius: 8,
-    paddingVertical: 13,
+  primaryButton: {
+    backgroundColor: '#0F172A',
+    borderRadius: 10,
+    paddingVertical: 14,
     alignItems: 'center',
     marginTop: 6,
   },
@@ -436,20 +605,20 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
   buttonPressed: {
-    opacity: 0.85,
+    opacity: 0.88,
   },
-  buttonText: {
+  primaryButtonText: {
     color: '#FFFFFF',
     fontSize: 15,
     fontWeight: '600',
   },
-  secondaryLink: {
-    marginTop: 14,
+  textLinkButton: {
+    marginTop: 16,
     alignItems: 'center',
   },
-  secondaryLinkText: {
+  textLink: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#4B5563',
+    color: '#475569',
   },
 });

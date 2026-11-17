@@ -4,11 +4,18 @@ export { RouteErrorBoundary as ErrorBoundary } from '@/components/route-error-bo
 
 export default function AppLayout() {
   return (
-    <Stack>
-      <Stack.Screen name="index" options={{ title: 'Home' }} />
+    <Stack
+      screenOptions={{
+        headerShadowVisible: false,
+        headerStyle: { backgroundColor: '#F8FAFC' },
+        headerTintColor: '#0F172A',
+        headerTitleStyle: { fontWeight: '600', fontSize: 17 },
+      }}
+    >
+      <Stack.Screen name="index" options={{ headerShown: false }} />
       <Stack.Screen
         name="details"
-        options={{ title: 'Reliability & Chaos Lab', presentation: 'modal' }}
+        options={{ title: 'Account & Security', presentation: 'card' }}
       />
     </Stack>
   );

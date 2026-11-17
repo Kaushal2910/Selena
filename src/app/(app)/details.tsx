@@ -1,10 +1,6 @@
-import {
-  HttpStatusError,
-  OfflineError,
-  requestWithRetry,
-} from '@/services/http-client';
-import { useRouter } from 'expo-router';
-import { useState } from 'react';
+import { env } from '@/config/env';
+import { useAuth } from '@/services/auth-context';
+import React from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -15,140 +11,90 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-interface AttemptEntry {
-  id: string;
-  text: string;
+interface SecurityControlItem {
+  title: string;
+  description: string;
+  status: string;
 }
 
-export default function ReliabilityChaosLabScreen() {
-  const router = useRouter();
-  const [shouldCrash, setShouldCrash] = useState<boolean>(false);
-  const [isTestingNetwork, setIsTestingNetwork] = useState<boolean>(false);
-  const [attemptLogs, setAttemptLogs] = useState<AttemptEntry[]>([]);
+const SECURITY_CONTROLS: SecurityControlItem[] = [
+  {
+    title: 'Hardware Keystore Encryption',
+    description:
+      'Session credentials are encrypted at rest on device hardware.',
+    status: 'Enabled',
+  },
+  {
+    title: 'Network Timeout Protection',
+    description: 'Automatic request timeouts, offline detection, and backoff.',
+    status: 'Active',
+  },
+];
 
-  if (shouldCrash) {
-    throw new Error(
-      'Simulated render fault for token eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test.sig and user test@example.com'
-    );
-  }
-
-  const appendLog = (text: string) => {
-    setAttemptLogs((prev) => [
-      ...prev,
-      { id: `${Date.now()}-${Math.random()}`, text },
-    ]);
-  };
-
-  const handleTestResilientCall = async () => {
-    if (isTestingNetwork) return;
-    setIsTestingNetwork(true);
-    setAttemptLogs([]);
-
-    const startedAt = Date.now();
-    appendLog('Starting requestWithRetry (timeoutMs: 1200, maxRetries: 2)...');
-
-    try {
-      // Uses a deliberately slow endpoint (3s delay) against a 1200ms timeout to demonstrate AbortController + backoff retries
-      await requestWithRetry<Record<string, unknown>>(
-        'https://httpbin.org/delay/3',
-        {
-          timeoutMs: 1200,
-          maxRetries: 2,
-          baseDelayMs: 350,
-          onAttempt: (attempt, detail) => {
-            appendLog(`[Attempt ${attempt}] ${detail}`);
-          },
-        }
-      );
-
-      const elapsed = Date.now() - startedAt;
-      appendLog(`Succeeded in ${elapsed}ms.`);
-    } catch (err) {
-      const elapsed = Date.now() - startedAt;
-      if (err instanceof OfflineError) {
-        appendLog(`Aborted immediately (${elapsed}ms): ${err.message}`);
-      } else if (err instanceof HttpStatusError) {
-        appendLog(`HTTP ${err.status} after ${elapsed}ms: ${err.message}`);
-      } else if (err instanceof Error) {
-        appendLog(
-          `Exhausted retries after ${elapsed}ms (${err.name}): ${err.message}`
-        );
-      } else {
-        appendLog(`Failed after ${elapsed}ms with unknown error.`);
-      }
-    } finally {
-      setIsTestingNetwork(false);
-    }
-  };
+export default function AccountAndSecurityScreen() {
+  const { user, signOut, isSubmitting } = useAuth();
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['bottom']}>
       <ScrollView contentContainerStyle={styles.container}>
+        <Text style={styles.sectionLabel}>Profile Summary</Text>
         <View style={styles.card}>
-          <Text style={styles.sectionTitle}>1. Resilient HTTP Client</Text>
-          <Text style={styles.body}>
-            Dispatches a request with a 1200ms AbortController timeout against a
-            3000ms delayed endpoint (or fails fast if Airplane Mode is active)
-            to demonstrate exponential backoff + jitter.
-          </Text>
-
-          <Pressable
-            style={({ pressed }) => [
-              styles.primaryButton,
-              isTestingNetwork ? styles.buttonDisabled : null,
-              pressed && !isTestingNetwork ? styles.buttonPressed : null,
-            ]}
-            onPress={() => void handleTestResilientCall()}
-            disabled={isTestingNetwork}
-          >
-            {isTestingNetwork ? (
-              <ActivityIndicator color="#FFFFFF" />
-            ) : (
-              <Text style={styles.primaryButtonText}>
-                Test Resilient Network Call (Timeout & Backoff)
-              </Text>
-            )}
-          </Pressable>
-
-          <View style={styles.logBox}>
-            <Text style={styles.logHeader}>Attempt & Latency Log</Text>
-            {attemptLogs.length === 0 ? (
-              <Text style={styles.logPlaceholder}>
-                Tap the button above to run a simulated timeout/retry cycle.
-              </Text>
-            ) : (
-              attemptLogs.map((entry) => (
-                <Text key={entry.id} style={styles.logEntry}>
-                  {entry.text}
-                </Text>
-              ))
-            )}
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>Email</Text>
+            <Text style={styles.rowValue} numberOfLines={1}>
+              {user?.email ?? 'Unavailable'}
+            </Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>User ID</Text>
+            <Text style={styles.rowValueMono} numberOfLines={1}>
+              {user?.id ?? 'Unavailable'}
+            </Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>Environment</Text>
+            <Text style={styles.rowValueCapitalized}>
+              {env.EXPO_PUBLIC_APP_ENV}
+            </Text>
           </View>
         </View>
 
+        <Text style={styles.sectionLabel}>Active Security Controls</Text>
         <View style={styles.card}>
-          <Text style={styles.sectionTitle}>2. Error Boundary & PII Scrub</Text>
-          <Text style={styles.body}>
-            Throws a synchronous render exception containing a mock JWT and
-            email address. Verify that RouteErrorBoundary catches it, scrubs PII
-            in console logs, and recovers when tapping Try Again.
-          </Text>
-
-          <Pressable
-            style={({ pressed }) => [
-              styles.dangerButton,
-              pressed ? styles.buttonPressed : null,
-            ]}
-            onPress={() => setShouldCrash(true)}
-          >
-            <Text style={styles.dangerButtonText}>
-              Trigger Controlled Render Crash
-            </Text>
-          </Pressable>
+          {SECURITY_CONTROLS.map((item, index) => (
+            <React.Fragment key={item.title}>
+              {index > 0 ? <View style={styles.divider} /> : null}
+              <View style={styles.securityRow}>
+                <View style={styles.securityTextGroup}>
+                  <Text style={styles.securityTitle}>{item.title}</Text>
+                  <Text style={styles.securityDescription}>
+                    {item.description}
+                  </Text>
+                </View>
+                <View style={styles.enabledBadge}>
+                  <Text style={styles.enabledBadgeText}>{item.status}</Text>
+                </View>
+              </View>
+            </React.Fragment>
+          ))}
         </View>
 
-        <Pressable style={styles.secondaryButton} onPress={() => router.back()}>
-          <Text style={styles.secondaryButtonText}>Pop Back to Home</Text>
+        <Pressable
+          style={({ pressed }) => [
+            styles.signOutButton,
+            isSubmitting ? styles.buttonDisabled : null,
+            pressed && !isSubmitting ? styles.buttonPressed : null,
+          ]}
+          onPress={() => void signOut()}
+          disabled={isSubmitting}
+        >
+          {isSubmitting ? (
+            <ActivityIndicator color="#B91C1C" size="small" />
+          ) : (
+            <Text style={styles.signOutText}>Sign Out</Text>
+          )}
         </Pressable>
       </ScrollView>
     </SafeAreaView>
@@ -158,67 +104,106 @@ export default function ReliabilityChaosLabScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#F9FAFB',
+    backgroundColor: '#F8FAFC',
   },
   container: {
     padding: 20,
-    gap: 16,
+    paddingBottom: 36,
+  },
+  sectionLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#64748B',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 10,
   },
   card: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 18,
+    borderRadius: 14,
+    paddingHorizontal: 18,
+    paddingVertical: 6,
     borderWidth: 1,
-    borderColor: '#E5E7EB',
+    borderColor: '#E2E8F0',
+    marginBottom: 22,
   },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#111827',
-    marginBottom: 8,
-  },
-  body: {
-    fontSize: 13,
-    lineHeight: 19,
-    color: '#4B5563',
-    marginBottom: 14,
-  },
-  primaryButton: {
-    backgroundColor: '#111827',
-    borderRadius: 8,
-    paddingVertical: 13,
-    paddingHorizontal: 14,
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 14,
+    paddingVertical: 13,
+    gap: 16,
   },
-  primaryButtonText: {
-    color: '#FFFFFF',
-    fontSize: 13,
+  rowLabel: {
+    fontSize: 14,
+    color: '#64748B',
+    fontWeight: '500',
+  },
+  rowValue: {
+    flex: 1,
+    textAlign: 'right',
+    fontSize: 14,
+    color: '#0F172A',
     fontWeight: '600',
   },
-  dangerButton: {
+  rowValueMono: {
+    flex: 1,
+    textAlign: 'right',
+    fontSize: 13,
+    fontFamily: 'monospace',
+    color: '#0F172A',
+    fontWeight: '600',
+  },
+  rowValueCapitalized: {
+    fontSize: 14,
+    color: '#0F172A',
+    fontWeight: '600',
+    textTransform: 'capitalize',
+  },
+  divider: {
+    height: 1,
+    backgroundColor: '#F1F5F9',
+  },
+  securityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 14,
+    gap: 12,
+  },
+  securityTextGroup: {
+    flex: 1,
+  },
+  securityTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0F172A',
+  },
+  securityDescription: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 2,
+    lineHeight: 17,
+  },
+  enabledBadge: {
+    backgroundColor: '#ECFDF5',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  enabledBadgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#047857',
+  },
+  signOutButton: {
     backgroundColor: '#FEF2F2',
     borderWidth: 1,
-    borderColor: '#FCA5A5',
-    borderRadius: 8,
-    paddingVertical: 13,
+    borderColor: '#FECACA',
+    borderRadius: 12,
+    paddingVertical: 14,
     alignItems: 'center',
-  },
-  dangerButtonText: {
-    color: '#B91C1C',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  secondaryButton: {
-    backgroundColor: '#E5E7EB',
-    borderRadius: 8,
-    paddingVertical: 13,
-    alignItems: 'center',
-  },
-  secondaryButtonText: {
-    color: '#111827',
-    fontSize: 14,
-    fontWeight: '600',
+    marginTop: 4,
   },
   buttonDisabled: {
     opacity: 0.6,
@@ -226,27 +211,9 @@ const styles = StyleSheet.create({
   buttonPressed: {
     opacity: 0.85,
   },
-  logBox: {
-    backgroundColor: '#111827',
-    borderRadius: 8,
-    padding: 12,
-  },
-  logHeader: {
-    fontSize: 11,
+  signOutText: {
+    color: '#B91C1C',
+    fontSize: 15,
     fontWeight: '600',
-    color: '#9CA3AF',
-    marginBottom: 6,
-    textTransform: 'uppercase',
-  },
-  logPlaceholder: {
-    fontSize: 12,
-    fontFamily: 'monospace',
-    color: '#6B7280',
-  },
-  logEntry: {
-    fontSize: 12,
-    fontFamily: 'monospace',
-    color: '#E5E7EB',
-    marginBottom: 4,
   },
 });

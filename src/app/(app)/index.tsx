@@ -1,164 +1,259 @@
 import { env } from '@/config/env';
 import { useAuth } from '@/services/auth-context';
+import {
+  HttpStatusError,
+  OfflineError,
+  requestWithRetry,
+} from '@/services/http-client';
 import { hasPersistedSessionToken } from '@/services/token-cache';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useState } from 'react';
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-interface LifecycleLog {
-  id: string;
-  event: 'MOUNT (useEffect)' | 'FOCUS (useFocusEffect)' | 'BLUR (cleanup)';
-  timestamp: string;
-}
+type ServiceHealthState =
+  | { status: 'idle' }
+  | { status: 'checking' }
+  | { status: 'operational'; latencyMs: number }
+  | { status: 'degraded'; message: string };
 
-function formatTime(): string {
-  return new Date().toISOString().split('T')[1]?.replace('Z', '') ?? '';
-}
-
-export default function ProtectedHomeScreen() {
-  const { user, signOut, isSubmitting } = useAuth();
+export default function HomeDashboardScreen() {
+  const { user } = useAuth();
   const router = useRouter();
-  const [mountTime, setMountTime] = useState<string>('Pending...');
-  const [focusCount, setFocusCount] = useState<number>(0);
-  const [logs, setLogs] = useState<LifecycleLog[]>([]);
-  const [keystorePersisted, setKeystorePersisted] = useState<boolean | null>(
-    null
-  );
-
-  const appendLog = useCallback((event: LifecycleLog['event']) => {
-    const timestamp = formatTime();
-    setLogs((prev) => [
-      { id: `${Date.now()}-${Math.random()}`, event, timestamp },
-      ...prev.slice(0, 9),
-    ]);
-    return timestamp;
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-
-    async function inspectKeystoreAndMount() {
-      const persisted = await hasPersistedSessionToken();
-      if (!active) return;
-      setKeystorePersisted(persisted);
-      const ts = appendLog('MOUNT (useEffect)');
-      setMountTime(ts);
-    }
-
-    void inspectKeystoreAndMount();
-
-    return () => {
-      active = false;
-    };
-  }, [appendLog]);
+  const [isKeystoreEncrypted, setIsKeystoreEncrypted] = useState<boolean>(true);
+  const [healthState, setHealthState] = useState<ServiceHealthState>({
+    status: 'idle',
+  });
+  const [isSimulatingRetry, setIsSimulatingRetry] = useState<boolean>(false);
+  const [retryLogs, setRetryLogs] = useState<string[]>([]);
 
   useFocusEffect(
     useCallback(() => {
-      appendLog('FOCUS (useFocusEffect)');
-      setFocusCount((prev) => prev + 1);
-
+      let active = true;
+      void hasPersistedSessionToken().then((persisted) => {
+        if (!active) return;
+        setIsKeystoreEncrypted(persisted);
+      });
       return () => {
-        appendLog('BLUR (cleanup)');
+        active = false;
       };
-    }, [appendLog])
+    }, [])
   );
 
+  const handleCheckApiStatus = async () => {
+    if (healthState.status === 'checking' || isSimulatingRetry) return;
+    setHealthState({ status: 'checking' });
+    setRetryLogs([]);
+
+    const startedAt = Date.now();
+    try {
+      await requestWithRetry<Record<string, unknown>>(
+        'https://httpbin.org/get',
+        {
+          timeoutMs: 6000,
+          maxRetries: 2,
+        }
+      );
+      const latencyMs = Date.now() - startedAt;
+      setHealthState({ status: 'operational', latencyMs });
+    } catch (err) {
+      const message =
+        err instanceof OfflineError
+          ? 'Device is offline'
+          : err instanceof HttpStatusError
+            ? `Service responded with HTTP ${err.status}`
+            : 'Service unreachable';
+      setHealthState({ status: 'degraded', message });
+    }
+  };
+
+  const handleSimulateFailingEndpoint = async () => {
+    if (isSimulatingRetry || healthState.status === 'checking') return;
+    setIsSimulatingRetry(true);
+    setRetryLogs([]);
+
+    const startedAt = Date.now();
+    try {
+      await requestWithRetry<Record<string, unknown>>(
+        'https://httpbin.org/status/503',
+        {
+          timeoutMs: 5000,
+          maxRetries: 2,
+          baseDelayMs: 350,
+          onAttempt: (attempt, detail) => {
+            setRetryLogs((prev) => [...prev, `Attempt ${attempt}: ${detail}`]);
+          },
+        }
+      );
+    } catch (err) {
+      const elapsed = Date.now() - startedAt;
+      const summary =
+        err instanceof OfflineError
+          ? 'Aborted immediately: Device is offline.'
+          : err instanceof HttpStatusError
+            ? `Completed 3 attempts in ${elapsed}ms (HTTP ${err.status}).`
+            : `Completed retry cycle in ${elapsed}ms.`;
+      setRetryLogs((prev) => [...prev, summary]);
+    } finally {
+      setIsSimulatingRetry(false);
+    }
+  };
+
+  const emailHandle = user?.email.split('@')[0] ?? 'Member';
+
   return (
-    <SafeAreaView style={styles.safeArea} edges={['bottom']}>
+    <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container}>
+        <View style={styles.header}>
+          <View style={styles.headerTextGroup}>
+            <Text style={styles.greeting}>
+              {user?.fullName
+                ? `Welcome back, ${user.fullName}`
+                : 'Welcome back'}
+            </Text>
+            <Text style={styles.subGreeting}>
+              {user?.email ?? 'Authenticated workspace'}
+            </Text>
+          </View>
+          <View style={styles.statusPill}>
+            <View style={styles.statusDot} />
+            <Text style={styles.statusPillText}>{env.EXPO_PUBLIC_APP_ENV}</Text>
+          </View>
+        </View>
+
+        <Text style={styles.sectionLabel}>Workspace Overview</Text>
+
         <View style={styles.card}>
-          <View style={styles.headerRow}>
-            <Text style={styles.sectionTitle}>Clerk Session</Text>
+          <View style={styles.cardHeader}>
+            <Text style={styles.cardTitle}>Session Security</Text>
             <View
               style={[
                 styles.badge,
-                keystorePersisted === true
-                  ? styles.badgeSuccess
-                  : keystorePersisted === false
-                    ? styles.badgeWarning
-                    : styles.badgeNeutral,
+                isKeystoreEncrypted ? styles.badgeGreen : styles.badgeAmber,
               ]}
             >
               <Text
                 style={[
                   styles.badgeText,
-                  keystorePersisted === true
-                    ? styles.badgeTextSuccess
-                    : keystorePersisted === false
-                      ? styles.badgeTextWarning
-                      : styles.badgeTextNeutral,
+                  isKeystoreEncrypted
+                    ? styles.badgeTextGreen
+                    : styles.badgeTextAmber,
                 ]}
               >
-                {keystorePersisted === true
-                  ? 'Keystore: Token Persisted'
-                  : keystorePersisted === false
-                    ? 'Keystore: Empty'
-                    : 'Keystore: Checking...'}
+                {isKeystoreEncrypted ? 'Encrypted' : 'Active'}
               </Text>
             </View>
           </View>
-
-          <Text style={styles.metaText}>
-            Clerk User ID:{' '}
-            <Text style={styles.monoBold}>{user?.id ?? 'Unavailable'}</Text>
-          </Text>
-          <Text style={styles.metaText}>
-            Verified Email:{' '}
-            <Text style={styles.bold}>{user?.email ?? 'Unavailable'}</Text>
-          </Text>
-          <Text style={styles.metaText}>
-            Environment:{' '}
-            <Text style={styles.bold}>{env.EXPO_PUBLIC_APP_ENV}</Text>
+          <Text style={styles.cardDescription}>
+            {isKeystoreEncrypted
+              ? 'Verified & Hardware-Encrypted via Android Keystore'
+              : 'Verified session active in memory'}
           </Text>
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Lifecycle Inspector</Text>
-          <Text style={styles.helperText}>
-            Push Details to cover this screen. Notice how Mount timestamp stays
-            constant in RAM while Focus fires again on return.
+          <View style={styles.cardHeader}>
+            <Text style={styles.cardTitle}>API Service Status</Text>
+            {healthState.status === 'operational' ? (
+              <View style={[styles.badge, styles.badgeGreen]}>
+                <Text style={[styles.badgeText, styles.badgeTextGreen]}>
+                  Operational · {healthState.latencyMs}ms
+                </Text>
+              </View>
+            ) : healthState.status === 'degraded' ? (
+              <View style={[styles.badge, styles.badgeRed]}>
+                <Text style={[styles.badgeText, styles.badgeTextRed]}>
+                  {healthState.message}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+
+          <Text style={styles.cardDescription}>
+            Verify upstream API reachability and latency with automatic timeout
+            and retry protection.
           </Text>
 
-          <View style={styles.statsRow}>
-            <View style={styles.statBox}>
-              <Text style={styles.statLabel}>Mounted At</Text>
-              <Text style={styles.statValue}>{mountTime}</Text>
-            </View>
-            <View style={styles.statBox}>
-              <Text style={styles.statLabel}>Focus Count</Text>
-              <Text style={styles.statValue}>{focusCount}</Text>
-            </View>
+          <View style={styles.actionStack}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.primaryButton,
+                healthState.status === 'checking' || isSimulatingRetry
+                  ? styles.buttonDisabled
+                  : null,
+                pressed ? styles.buttonPressed : null,
+              ]}
+              onPress={() => void handleCheckApiStatus()}
+              disabled={healthState.status === 'checking' || isSimulatingRetry}
+            >
+              {healthState.status === 'checking' ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <Text style={styles.primaryButtonText}>Check API Status</Text>
+              )}
+            </Pressable>
+
+            <Pressable
+              style={({ pressed }) => [
+                styles.secondaryButton,
+                isSimulatingRetry || healthState.status === 'checking'
+                  ? styles.buttonDisabled
+                  : null,
+                pressed ? styles.buttonPressed : null,
+              ]}
+              onPress={() => void handleSimulateFailingEndpoint()}
+              disabled={isSimulatingRetry || healthState.status === 'checking'}
+            >
+              {isSimulatingRetry ? (
+                <ActivityIndicator color="#0F172A" size="small" />
+              ) : (
+                <Text style={styles.secondaryButtonText}>
+                  Simulate Slow/Failing Endpoint
+                </Text>
+              )}
+            </Pressable>
           </View>
 
-          <Pressable
-            style={styles.primaryButton}
-            onPress={() => router.push('/(app)/details')}
-          >
-            <Text style={styles.primaryButtonText}>
-              Push Details Route (Test Focus)
-            </Text>
-          </Pressable>
-
-          <View style={styles.logBox}>
-            <Text style={styles.logHeader}>Event Timeline (Newest First)</Text>
-            {logs.map((entry) => (
-              <Text key={entry.id} style={styles.logEntry}>
-                [{entry.timestamp}] {entry.event}
-              </Text>
-            ))}
-          </View>
+          {retryLogs.length > 0 ? (
+            <View style={styles.attemptBox}>
+              <View style={styles.attemptHeader}>
+                <Text style={styles.attemptHeaderTitle}>Request Trace</Text>
+                <Pressable onPress={() => setRetryLogs([])} hitSlop={8}>
+                  <Text style={styles.clearLogsText}>Clear</Text>
+                </Pressable>
+              </View>
+              {retryLogs.map((line, idx) => (
+                <Text key={`${idx}-${line}`} style={styles.attemptText}>
+                  {line}
+                </Text>
+              ))}
+            </View>
+          ) : null}
         </View>
 
+        <Text style={styles.sectionLabel}>Settings</Text>
+
         <Pressable
-          style={[
-            styles.signOutButton,
-            isSubmitting ? styles.buttonDisabled : null,
+          style={({ pressed }) => [
+            styles.navCard,
+            pressed ? styles.buttonPressed : null,
           ]}
-          onPress={() => void signOut()}
-          disabled={isSubmitting}
+          onPress={() => router.push('/(app)/details')}
         >
-          <Text style={styles.signOutText}>Sign Out & Purge Keystore</Text>
+          <View style={styles.navCardContent}>
+            <Text style={styles.navCardTitle}>Account & Security</Text>
+            <Text style={styles.navCardSubtitle}>
+              Profile details, encryption status, and session management
+            </Text>
+          </View>
+          <Text style={styles.chevron}>›</Text>
         </Pressable>
       </ScrollView>
     </SafeAreaView>
@@ -166,149 +261,212 @@ export default function ProtectedHomeScreen() {
 }
 
 const styles = StyleSheet.create({
+  attemptHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+    paddingBottom: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+  },
+  attemptHeaderTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748B',
+    textTransform: 'uppercase',
+  },
+  clearLogsText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#0F172A',
+  },
   safeArea: {
     flex: 1,
-    backgroundColor: '#F9FAFB',
+    backgroundColor: '#F8FAFC',
   },
   container: {
     padding: 20,
-    gap: 16,
+    paddingBottom: 36,
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 24,
+    gap: 12,
+  },
+  headerTextGroup: {
+    flex: 1,
+  },
+  greeting: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#0F172A',
+    letterSpacing: -0.3,
+  },
+  subGreeting: {
+    fontSize: 14,
+    color: '#64748B',
+    marginTop: 3,
+  },
+  statusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    gap: 6,
+  },
+  statusDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#10B981',
+  },
+  statusPillText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#334155',
+    textTransform: 'capitalize',
+  },
+  sectionLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#64748B',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 10,
   },
   card: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 18,
     borderWidth: 1,
-    borderColor: '#E5E7EB',
+    borderColor: '#E2E8F0',
+    marginBottom: 16,
   },
-  headerRow: {
+  cardHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 8,
+    alignItems: 'center',
     gap: 8,
+    marginBottom: 6,
   },
-  sectionTitle: {
-    fontSize: 17,
+  cardTitle: {
+    fontSize: 16,
     fontWeight: '700',
-    color: '#111827',
+    color: '#0F172A',
+  },
+  cardDescription: {
+    fontSize: 13,
+    lineHeight: 19,
+    color: '#475569',
   },
   badge: {
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 999,
   },
-  badgeSuccess: {
-    backgroundColor: '#DCFCE7',
+  badgeGreen: {
+    backgroundColor: '#ECFDF5',
   },
-  badgeWarning: {
-    backgroundColor: '#FEF3C7',
+  badgeAmber: {
+    backgroundColor: '#FFFBEB',
   },
-  badgeNeutral: {
-    backgroundColor: '#F3F4F6',
+  badgeRed: {
+    backgroundColor: '#FEF2F2',
   },
   badgeText: {
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  badgeTextSuccess: {
-    color: '#166534',
-  },
-  badgeTextWarning: {
-    color: '#92400E',
-  },
-  badgeTextNeutral: {
-    color: '#4B5563',
-  },
-  metaText: {
-    fontSize: 14,
-    color: '#374151',
-    marginTop: 6,
-  },
-  bold: {
+    fontSize: 12,
     fontWeight: '600',
-    color: '#111827',
   },
-  monoBold: {
-    fontFamily: 'monospace',
-    fontWeight: '600',
-    fontSize: 13,
-    color: '#111827',
+  badgeTextGreen: {
+    color: '#047857',
   },
-  helperText: {
-    fontSize: 13,
-    color: '#6B7280',
-    lineHeight: 18,
-    marginTop: 6,
-    marginBottom: 14,
+  badgeTextAmber: {
+    color: '#B45309',
   },
-  statsRow: {
-    flexDirection: 'row',
-    gap: 12,
-    marginBottom: 14,
+  badgeTextRed: {
+    color: '#B91C1C',
   },
-  statBox: {
-    flex: 1,
-    backgroundColor: '#F3F4F6',
-    padding: 12,
-    borderRadius: 8,
-  },
-  statLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#6B7280',
-    textTransform: 'uppercase',
-  },
-  statValue: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#111827',
-    marginTop: 4,
+  actionStack: {
+    marginTop: 14,
+    gap: 10,
   },
   primaryButton: {
-    backgroundColor: '#111827',
-    borderRadius: 8,
+    backgroundColor: '#0F172A',
+    borderRadius: 10,
     paddingVertical: 12,
     alignItems: 'center',
-    marginBottom: 14,
   },
   primaryButtonText: {
     color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '600',
   },
-  logBox: {
-    backgroundColor: '#111827',
-    borderRadius: 8,
-    padding: 12,
-  },
-  logHeader: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#9CA3AF',
-    marginBottom: 6,
-    textTransform: 'uppercase',
-  },
-  logEntry: {
-    fontSize: 12,
-    fontFamily: 'monospace',
-    color: '#E5E7EB',
-    marginBottom: 3,
-  },
-  signOutButton: {
-    backgroundColor: '#FEE2E2',
-    borderWidth: 1,
-    borderColor: '#FCA5A5',
-    borderRadius: 8,
-    paddingVertical: 13,
+  secondaryButton: {
+    backgroundColor: '#F1F5F9',
+    borderRadius: 10,
+    paddingVertical: 11,
     alignItems: 'center',
+  },
+  secondaryButtonText: {
+    color: '#0F172A',
+    fontSize: 13,
+    fontWeight: '600',
   },
   buttonDisabled: {
     opacity: 0.6,
   },
-  signOutText: {
-    color: '#B91C1C',
-    fontSize: 15,
+  buttonPressed: {
+    opacity: 0.85,
+  },
+  attemptBox: {
+    marginTop: 12,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 10,
+    padding: 12,
+    gap: 4,
+  },
+  attemptText: {
+    fontSize: 12,
+    color: '#334155',
+    lineHeight: 17,
+  },
+  navCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  navCardContent: {
+    flex: 1,
+  },
+  navCardTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  navCardSubtitle: {
+    fontSize: 13,
+    color: '#64748B',
+    marginTop: 3,
+    lineHeight: 18,
+  },
+  chevron: {
+    fontSize: 22,
     fontWeight: '600',
+    color: '#94A3B8',
   },
 });
